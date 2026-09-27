@@ -12,6 +12,20 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    /** 认证失败（MVC 层抛出；JWT 过滤器内的 401 由过滤器自行写 JSON） */
+    @ExceptionHandler(com.evops.auth.UnauthorizedException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public ApiResponse<Void> handleUnauthorized(com.evops.auth.UnauthorizedException ex) {
+        return ApiResponse.fail(ex.getCode(), ex.getMessage());
+    }
+
+    /** 已登录但角色不足 */
+    @ExceptionHandler(com.evops.auth.ForbiddenException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public ApiResponse<Void> handleForbidden(com.evops.auth.ForbiddenException ex) {
+        return ApiResponse.fail("FORBIDDEN", ex.getMessage());
+    }
+
     /** 业务规则冲突（状态流转非法、物理删除被拒、单据不存在等） */
     @ExceptionHandler(BizException.class)
     @ResponseStatus(HttpStatus.CONFLICT)

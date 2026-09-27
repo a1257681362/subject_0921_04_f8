@@ -36,6 +36,30 @@ mybatis-plus:
 
 # 对账周期任务（recon-1）：cron 可配，改点不动代码；enabled=false 为应急总开关
 evops:
+  # 登录态多端会话（auth-1）：JWT 访问令牌短期有效、刷新令牌一次性轮换、改密全端下线。
+  # 生产部署务必覆盖 jwt.secret（≥32 字节，建议经环境变量 EVOPS_AUTH_JWT_SECRET 注入）。
+  auth:
+    enabled: true
+    jwt:
+      # 开发默认密钥仅用于本地零配置启动；生产检测到默认值会在启动日志打 WARN
+      secret: ${EVOPS_AUTH_JWT_SECRET:evops-dev-only-secret-key-please-change-0123456789}
+      # 访问令牌有效期（秒）：30 分钟，过期前端凭刷新令牌无感换新
+      access-token-ttl-seconds: 1800
+      issuer: evops
+    refresh:
+      # 刷新令牌（会话）有效期（天）
+      ttl-days: 7
+    # 库中无账号时首次启动创建引导管理员；创建后请尽快登录改密或建专属管理员
+    bootstrap:
+      enabled: true
+      username: admin
+      password: admin123
+      display-name: 引导管理员
+  # 周转率统计（turnover-1）：当天快照可重算，凌晨关账冻结前一业务日。
+  turnover:
+    enabled: true
+    # 凌晨关账作业（默认每天 04:00，避开对账 02:00/03:00 作业）
+    daily-close-cron: "0 0 4 * * ?"
   # 交车生命周期状态机（rental-fsm-1）：合法路径集中在此配置，代码不硬编码状态判断。
   # 越级（如 CREATED 直接 ARCHIVE）、回退（如 RENTING 退回 CREATED）、未知动作都因
   # “不在合法路径内”被统一拒绝。新增状态/动作只在此加规则并重启生效，不改代码；

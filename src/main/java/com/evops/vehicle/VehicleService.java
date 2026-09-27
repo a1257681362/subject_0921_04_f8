@@ -27,6 +27,7 @@ public class VehicleService {
         Vehicle vehicle = new Vehicle();
         vehicle.setPlateNo(request.getPlateNo());
         vehicle.setModel(request.getModel());
+        vehicle.setBranchCode(request.getBranchCode());
         vehicle.setStatus("IDLE");
         vehicleMapper.insert(vehicle);
         return vehicle;

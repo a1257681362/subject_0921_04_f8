@@ -370,3 +370,100 @@ SETTLED / ARCHIVED --REVERSE冲销(forward:false)--> REVERSED
 ### 测试
 
 `mvn test`：新增 9 个集成用例覆盖上传即返回 PENDING 与异步置 DONE、耗时落库可见、EXIF 方向 6/8 摆正（色块位置断言）、无 EXIF 不旋转、小图不放大、水印痕迹校验、40 位超长订单号+空网点、非图片拒绝、坏图 FAILED 与重试计数、重复上传幂等、预览图未完成 409 与完成后下载一致。全量 56 个用例通过（既有 47 个用例零改动回归）。
+
+## 登录态多端会话（auth-1）
+
+背景：登录这块之前一直靠人工盯，旺季前必须系统化。本期落地：**JWT 携带调度员身份与角色；访问令牌短期有效、过期走刷新接口换新（前端无感）；刷新令牌一次性轮换；修改密码后全部端强制下线；登出后旧令牌立即失效。**
+
+### 令牌模型
+
+- **访问令牌**：标准 JWT（JWS, alg=HS256），零额外依赖（Jackson + JDK `javax.crypto.Mac`）。claims：`uid/username/roles`（身份与角色）、`tv`（tokenVersion，改密自增）、`sid`（所属会话）、`jti`、`type=ACCESS`、`iat/exp`。默认 30 分钟有效（`evops.auth.jwt.access-token-ttl-seconds`）。
+- **刷新令牌**：32 字节随机串（非 JWT），**库内只存 SHA-256 哈希**（`t_login_session.refresh_token_hash` 唯一），明文只在登录/刷新响应中出现一次。会话有效期默认 7 天（`evops.auth.refresh.ttl-days`）。
+- **会话即端**：每次登录产生一行 `t_login_session`（`client_type` = WEB/APP/...），多端并存互不顶掉；轮换复用同一会话行，`rotate_count` 累计。
+
+### 一次性轮换与重放侦测
+
+`POST /api/auth/refresh` 用刷新令牌换新一对令牌：
+
+1. 命中**当前**哈希 → CAS 原子轮换（`UPDATE ... WHERE refresh_token_hash=旧 AND status='ACTIVE'`），并发/重放只有一方影响行数为 1；旧哈希挪到 `prev_refresh_token_hash`；
+2. 命中**上一个**哈希 → 旧令牌再现 = 疑似被盗，**整段会话立即吊销**（吊销走独立事务，即便随后抛 401 也已落库），返回 401 `REFRESH_REPLAY`；
+3. 都不命中 → 401 `REFRESH_INVALID`。
+
+**前端契约**：同一刷新令牌必须串行使用（单飞锁）。收到 401 `TOKEN_EXPIRED` 后调刷新接口换新并重试原请求；刷新返回 401 则跳登录。多标签页同时刷新同一令牌会触发重放吊销——这是安全特性，请用单飞锁规避。
+
+### 登出立即失效 / 改密全端下线
+
+- 访问令牌绑定 `sid`，过滤器每请求校验会话状态：`POST /api/auth/logout` 吊销本端会话后，**该会话已签发的访问令牌下一次请求即被 401 拒绝**（`SESSION_REVOKED`），不等自然过期；
+- `POST /api/auth/password` 校验原密码后：密码摘要更新（PBKDF2WithHmacSHA256，每账号独立随机盐）、`token_version + 1`、**该账号全部 ACTIVE 会话吊销**——WEB/APP 各端访问令牌因 tv 失配立即 401（`TOKEN_VERSION_CHANGED`），刷新令牌也全部失效，所有端强制重新登录。
+
+### 账号与角色
+
+- 账号表 `t_sys_user`：角色 `DISPATCHER`（调度员）/`MANAGER`（主管）/`ADMIN`（管理员），状态 ACTIVE/DISABLED；
+- 首次启动库中无账号时，按 `evops.auth.bootstrap` 创建引导管理员（默认 admin/admin123，**生产务必立即改密或建专属账号**）；
+- 管理员接口 `POST /api/system/users`（创建账号）、`GET /api/system/users`（列表，不回传密码摘要），仅 ADMIN；
+- 角色控制：方法/类上 `@RequireRole`，未登录 401、角色不足 403；
+- `GET /api/auth/me` 返回当前身份与角色。
+
+### 接入与兼容
+
+- 认证由 `JwtAuthFilter` 负责（/api/**），Shiro 链对 /api/** 一律 anon 不再介入；匿名接口：`/api/health`、`/api/auth/login`、`/api/auth/refresh`；
+- 登录/刷新不走 `X-Operator`/`X-Request-No` 三件套（登录前没有操作人）；其余登录态写接口（登出/改密）也豁免入口幂等；
+- 生产必须覆盖 `evops.auth.jwt.secret`（≥32 字节，建议环境变量 `EVOPS_AUTH_JWT_SECRET` 注入），使用开发默认值启动会打 WARN；
+- `evops.auth.enabled=false` 为应急总开关（本地/排障）；测试默认经 `src/test/resources/application-test.yml` 关闭鉴权，既有 56 个用例零改动回归，登录态用例显式 `evops.auth.enabled=true`。
+
+### 接口速览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | /api/auth/login | 登录（username/password/clientType=WEB\|APP），下发访问+刷新令牌 |
+| POST | /api/auth/refresh | 刷新令牌换新（一次性轮换，重放吊销会话） |
+| POST | /api/auth/logout | 登出（需登录），本端会话吊销、旧令牌立即失效 |
+| POST | /api/auth/password | 修改密码（需登录），成功后全部端强制下线 |
+| GET | /api/auth/me | 当前登录态（身份+角色+会话） |
+| POST | /api/system/users | 创建账号（仅 ADMIN） |
+| GET | /api/system/users | 账号列表（仅 ADMIN） |
+
+### 测试
+
+`mvn test`：新增 8 个集成用例覆盖登录签发双令牌、错误密码/无令牌/伪造令牌 401、角色 403、刷新一次性轮换与重放吊销、并发刷新恰好一方成功（CAS）、登出后访问/刷新令牌立即失效、改密后 WEB/APP 两端强制下线（tokenVersion+会话吊销）、访问令牌过期 401 TOKEN_EXPIRED 后无感刷新重试成功。
+
+## 周转率统计（turnover-1）
+
+背景：周转率列入本期重点，**数字要经得起审计**。本期落地：每日每网点快照（当天可重算）、凌晨关账冻结、关账后只能追加冲正单（原因必填、append-only）、原始计数落库可独立复算、作业逐次留痕。
+
+### 审计口径（原始计数均可在业务表复算）
+
+- **在役车辆数** = `t_vehicle` 中 IDLE+RENTING（DISABLED 不计分母，单列披露）；
+- **完成订单数** = 事件流水 `t_rental_order_event` 中 biz_time 落在业务日的 RETURN（还车结算）行数——状态机保证一笔还车恰有一行；
+- **周转率** = 完成订单数 / 在役车辆数（DECIMAL(10,4)，HALF_UP，分母 0 为 null）；
+- **出租率** = 快照时点 RENTING / 在役车辆数；
+- 车辆/订单未分派网点（branch_code 为空）并入哨兵网点 `NO-BRANCH` 出快照；车辆新增可空 `branch_code` 归属网点（`POST /api/vehicles` 可传，存量为 null 不受影响）。
+
+### 快照生命周期
+
+```
+当天 OPEN（可重算刷新，recompute_count 累计）
+  --凌晨 04:00 作业（或手工 close）--> CLOSED（冻结，拒绝改写）
+CLOSED 后发现数据问题 --只能追加--> 冲正单（t_turnover_correction，原因必填）
+```
+
+- **重算**：`POST /api/turnover/run?bizDate=`（缺省当天），OPEN 快照原地刷新；已关账业务日 409 拒绝；
+- **关账**：凌晨 04:00 作业（`evops.turnover.daily-close-cron`）对前一业务日重算并置 CLOSED；已 CLOSED 网点幂等跳过；手工 `POST /api/turnover/close?bizDate=` 应急；
+- **冲正**：`POST /api/turnover/corrections`（仅 CLOSED 业务日；`completedDelta`/`totalVehiclesDelta` 可正可负，不能全 0；原因必填）。**基线行永不改写**，查询返回 基线 + 每笔冲正 + 冲正合计 + 最终值（最终比率由最终计数复算，不直接相加比率）；
+- **留痕**：`t_turnover_job_run` 记录每次重算/关账（含被拒的关账后重算，FAILED + 原因）。
+
+### 接口速览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | /api/turnover/daily?branchCode=&from=&to= | 审计视图：快照基线+冲正+最终值（登录即可） |
+| POST | /api/turnover/run?bizDate= | 手工重算（MANAGER/ADMIN；已关账 409） |
+| POST | /api/turnover/close?bizDate= | 手工关账冻结（MANAGER/ADMIN；缺省前一业务日） |
+| POST | /api/turnover/corrections | 关账后冲正（MANAGER/ADMIN；原因必填，append-only） |
+| GET | /api/turnover/job-runs?jobType=&bizDate= | 作业运行记录（凌晨关账/手工重算留痕） |
+
+写请求遵循三件套（X-Operator/X-Request-No）与入口幂等；作业内以 SYS_TURNOVER 身份留痕。`evops.turnover.enabled=false` 为应急总开关（不影响手工触发）。
+
+### 测试
+
+`mvn test`：新增 2 个集成用例（全链路造数：车辆/订单/交还车 → 统计 → 重算 → 关账 → 冲正）覆盖计数口径与比率复算（含 NO-BRANCH 归集、零订单网点、在租车辆）、当天重算刷新与重算计数、关账冻结拒绝改写、关账后重算 409、未关账冲正 409、原因必填 400、冲正后基线不变+最终值正确、作业留痕（SUCCESS/FAILED）、未登录 401 与调度员 403。

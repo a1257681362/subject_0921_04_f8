@@ -18,10 +18,15 @@ public class Vehicle extends BizEntity {
     /** IDLE 在库 / RENTING 出租中 / DISABLED 停用 */
     private String status;
 
+    /** 归属网点（turnover-1：周转率按网点归集分母；可空=未分派，统计并入 NO-BRANCH） */
+    private String branchCode;
+
     public String getPlateNo() { return plateNo; }
     public void setPlateNo(String plateNo) { this.plateNo = plateNo; }
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+    public String getBranchCode() { return branchCode; }
+    public void setBranchCode(String branchCode) { this.branchCode = branchCode; }
 }
