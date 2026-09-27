@@ -2,7 +2,8 @@
 
 这是 springboot的骨架项目。
 
-技术栈：Java 8、Spring Boot 2.7、MyBatis-Plus、H2 本地文件数据库、Shiro、Thymeleaf。
+技术栈：Java 8、Spring Boot 2.7、MyBatis-Plus、H2 本地文件数据库、Thymeleaf。
+登录态为自实现 JWT（JDK 原生 HS256 + PBKDF2，无第三方安全库），见「多端 JWT 登录态（auth-1）」。
 
 启动前准备：
 
@@ -370,3 +371,88 @@ SETTLED / ARCHIVED --REVERSE冲销(forward:false)--> REVERSED
 ### 测试
 
 `mvn test`：新增 9 个集成用例覆盖上传即返回 PENDING 与异步置 DONE、耗时落库可见、EXIF 方向 6/8 摆正（色块位置断言）、无 EXIF 不旋转、小图不放大、水印痕迹校验、40 位超长订单号+空网点、非图片拒绝、坏图 FAILED 与重试计数、重复上传幂等、预览图未完成 409 与完成后下载一致。全量 56 个用例通过（既有 47 个用例零改动回归）。
+
+## 多端 JWT 登录态（auth-1）
+
+背景：旺季前系统要多端使用，登录态过去靠人工盯。本期上线完整登录态：**JWT 携带调度员身份与角色；访问令牌短期、过期走刷新接口无感换新；刷新令牌一次性轮换、重用即吊销全端；登出后旧令牌立即失效；修改密码后全部端强制下线。**
+
+### 双令牌模型
+
+- **访问令牌**（默认 30 分钟，`evops.auth.access-ttl-minutes`）：HS256 JWT，声明含登录名、用户 id、角色、令牌版本、会话 id、jti。每次请求除验签外**回库确认会话存活、账号启用、令牌版本一致**——因此登出、改密、停用都在下一个请求立即生效，不靠等令牌自然过期；
+- **刷新令牌**（默认 7 天，`evops.auth.refresh-ttl-days`）：只存 SHA-256 哈希（`t_refresh_token` 台账 + 会话当前哈希），原值绝不落库；
+- **一次性轮换**：换新时旧令牌条件更新（仅 ACTIVE 可换）置 ROTATED 并记录后继 jti，并发/重放只有一方成功；已轮换或已吊销的令牌再次被提交即判定盗用，**吊销该端整条令牌家族链**（吊销走独立事务先提交，再返回 401）；
+- **多端**：每次登录一行会话（`t_user_session`，deviceType=WEB/APP），各端令牌家族独立，互不影响；
+- **操作人防冒充**：登录后业务操作人只取令牌内账号，客户端自报的 `X-Operator` 被忽略（未登录的匿名/应急模式才认该头）。
+
+### 无感刷新（客户端约定）
+
+访问令牌过期 → 业务请求返回 401 → 客户端用刷新令牌调 `POST /api/auth/refresh` 静默换新 → 拿新访问令牌重放原请求。刷新令牌也过期或被吊销时跳转重新登录。
+
+### 改密 / 停用 / 登出
+
+- 改密（自助或管理员重置）：`token_version+1` 并吊销该账号全部会话，**所有端（含当前端）强制下线**，需重新登录；
+- 停用账号：立即吊销全部会话，登录拒绝（403）；
+- 登出：当前端会话置 LOGGED_OUT，其访问/刷新令牌即刻不可用，其他端不受影响。
+
+### 角色
+
+`ADMIN`（账号管理）/ `DISPATCHER`（业务读写，默认）/ `VIEWER`（只读，写操作 403）。首次启动无账号时自动初始化 `admin/admin123`（**首次登录请立即改密**；生产务必用 `EVOPS_JWT_SECRET` 覆盖默认签名密钥）。
+
+### 接口速览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | /api/auth/login | 登录（匿名），返回双令牌与过期时刻 |
+| POST | /api/auth/refresh | 刷新（匿名）：旧刷新令牌一次性换新，重用即吊销全端 |
+| POST | /api/auth/logout | 登出：当前端立即失效 |
+| GET | /api/auth/me | 当前登录身份 |
+| POST | /api/auth/password | 自助改密，全部端强制下线 |
+| POST | /api/auth/users | 创建账号（ADMIN，默认 DISPATCHER 角色） |
+| GET | /api/auth/users | 账号列表（ADMIN，不返回哈希与盐） |
+| PUT | /api/auth/users/{id}/status | 启用/停用（ADMIN；停用即吊销全部会话） |
+| POST | /api/auth/users/{id}/password/reset | 管理员重置密码（全部端强制下线） |
+| GET | /api/auth/sessions?username= | 在线会话（ADMIN 查全部/指定人；其他角色只看自己） |
+| POST | /api/auth/sessions/{id}/revoke | 管理员强制某端下线 |
+| GET | /api/auth/events?username= | 登录态安全事件流水（ADMIN）：登录/刷新/登出/改密/吊销/重用 |
+
+登录/刷新免三件套；其余写请求在登录态下只需 `Authorization` 头（`X-Request-No` 可省，缺省服务端生成；带了仍按客户端请求号幂等）。原 Shiro 依赖与 `ShiroConfig` 已移除，鉴权统一由 `AuthInterceptor`（order 0）承担；`evops.auth.enabled=false` 为应急回退开关（回到旧的 X-Operator 三件套模式）。
+
+### 测试
+
+`mvn test`：新增 7 个集成用例覆盖登录与错误口令、无令牌/篡改令牌 401、操作人防冒充、刷新一次性轮换与重用吊销全家族、登出立即失效、改密全端下线、VIEWER 只读 403、账号管理 ADMIN 限定、停用即吊销、多端独立会话与无感刷新流程、安全事件留痕。既有业务测试以 `evops.auth.enabled=false` 保持原样回归。全量 67 个用例通过。
+
+## 周转率统计（turnover-1）
+
+背景：周转率列入本期重点，数字要经得起审计。统计**完全由订单事件流水推导**（不依赖车辆台账当前状态），任何历史区间都能按同一口径重算并对齐明细；快照确认后冻结，分子分母逐单逐车可勾稽。
+
+### 统计口径（区间 [起点, 终点)，半开）
+
+- **周期**：DAY 自然日 / WEEK ISO 周（周一起）/ MONTH 自然月；`bizDate` 传周期内任意一天即可；
+- **范围**：`branchCode` 缺省或 `*` 为全公司（含未分派网点），否则仅该网点（按订单归属网点快照）；
+- **分子 turnoverCount**：期内发生 RETURN（还车结算）且**截至出表时未被冲销**的去重订单数；已冲销订单不计入，剔除单数在头部 `reversedExcludedCount` 单独披露，明细行 `included=false` 可见；
+- **分母 activeVehicleCount**：期内发生过 PICKUP 或 RETURN 的**去重车辆数**（实际参与运营的车，而非账面全部车辆）；
+- **周转率** = 分子 / 分母（四位小数 HALF_UP，分母为 0 记 0），即期内单车平均周转次数。
+
+### 快照与审计
+
+- 同口径（周期类型+起点+网点）库层唯一：**GENERATED 可重算覆盖**（快照号不变，旧明细清空重落，确认信息抹除），**CONFIRMED 后冻结**，重算与重复确认一律 409；
+- 分子明细 `t_turnover_order_detail`：期内每笔结算订单一行（订单号/车辆/客户/网点/金额/还车时间/是否计入）；
+- 分母明细 `t_turnover_vehicle_detail`：期内每台活跃车辆一行（期内交接次数与首末交接时间）；
+- 头部计数 = 明细行数勾稽：turnoverCount=included 行数、activeVehicleCount=车辆行数，审计可逐行核对。
+
+### 接口速览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | /api/turnover/snapshots | 出表/重算（periodType/bizDate/branchCode） |
+| GET | /api/turnover/snapshots | 快照列表（periodType/branchCode/status 过滤） |
+| GET | /api/turnover/snapshots/{id} | 快照详情（头部 + 明细行数勾稽） |
+| GET | /api/turnover/snapshots/{id}/orders | 分子明细（含 included=false 剔除行） |
+| GET | /api/turnover/snapshots/{id}/vehicles | 分母明细（活跃车辆逐台） |
+| POST | /api/turnover/snapshots/{id}/confirm | 确认冻结（审计冻结点，不可逆） |
+
+写请求同样遵循登录态与入口幂等。
+
+### 测试
+
+`mvn test`：新增 4 个集成用例覆盖日快照全公司口径与逐单逐车明细勾稽、网点口径与周/月周期边界、重算幂等（快照号不变）与确认冻结后拒绝重算/重复确认、空周期零值与非法周期类型 400。

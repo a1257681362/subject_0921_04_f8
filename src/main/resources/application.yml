@@ -36,6 +36,14 @@ mybatis-plus:
 
 # 对账周期任务（recon-1）：cron 可配，改点不动代码；enabled=false 为应急总开关
 evops:
+  # 多端 JWT 登录态（auth-1）：访问令牌短期、过期走 /api/auth/refresh 无感换新；
+  # 刷新令牌一次性轮换、重用即吊销该端；登出/改密/停用立即回库失效。
+  # 生产必须用环境变量或私有配置覆盖 jwt-secret（至少 32 字节）。
+  auth:
+    jwt-secret: ${EVOPS_JWT_SECRET:evops-dev-only-secret-key-change-me-please-0123456789}
+    access-ttl-minutes: 30
+    refresh-ttl-days: 7
+    enabled: true
   # 交车生命周期状态机（rental-fsm-1）：合法路径集中在此配置，代码不硬编码状态判断。
   # 越级（如 CREATED 直接 ARCHIVE）、回退（如 RENTING 退回 CREATED）、未知动作都因
   # “不在合法路径内”被统一拒绝。新增状态/动作只在此加规则并重启生效，不改代码；

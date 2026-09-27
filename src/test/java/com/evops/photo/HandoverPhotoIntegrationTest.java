@@ -49,6 +49,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:h2:mem:photo-test;DB_CLOSE_DELAY=-1",
         "spring.sql.init.mode=always",
+        "evops.auth.enabled=false",
         "evops.recon.enabled=false",
         "evops.photo.dir=${java.io.tmpdir}/evops-photo-test/photos"
 })

@@ -47,6 +47,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:h2:mem:rental-fsm-test;DB_CLOSE_DELAY=-1",
         "spring.sql.init.mode=always",
+        "evops.auth.enabled=false",
         // 新增两个试点状态与动作，只加配置不改代码：
         // RENTING --暂扣复检--> INSPECTING --复检放行--> RENTING（显式允许的逆向回到租用中），
         // CREATED --暂缓--> HELD；HELD 为终态之一（本期不放开恢复）。

@@ -34,7 +34,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:h2:mem:branch-test;DB_CLOSE_DELAY=-1",
-        "spring.sql.init.mode=always"
+        "spring.sql.init.mode=always",
+        "evops.auth.enabled=false"
 })
 class BranchTreeIntegrationTest {
 

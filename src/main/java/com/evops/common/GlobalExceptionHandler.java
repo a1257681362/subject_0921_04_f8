@@ -41,6 +41,20 @@ public class GlobalExceptionHandler {
         return ApiResponse.fail(message);
     }
 
+    /** 未认证 / 登录态失效（无令牌、过期、已登出、被吊销、改密后版本失配） */
+    @ExceptionHandler(UnauthorizedException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public ApiResponse<Void> handleUnauthorized(UnauthorizedException ex) {
+        return ApiResponse.fail(ex.getMessage());
+    }
+
+    /** 已登录但权限不足（只读角色写操作、非管理员调管理接口） */
+    @ExceptionHandler(ForbiddenException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public ApiResponse<Void> handleForbidden(ForbiddenException ex) {
+        return ApiResponse.fail(ex.getMessage());
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> handleIllegalArgument(IllegalArgumentException ex) {
